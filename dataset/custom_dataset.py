@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import kornia
 import matplotlib.pyplot as plt
@@ -24,14 +25,15 @@ class Utils:
         return data
     
     @staticmethod
-    def visualize_dataset(image, figure_size=(8, 8), **args):
+    def visualize_dataset(image,
+                        figure_size=(8, 8),
+                        **args):
         """
         Visualize an image with RGB and NIR channels if available.
         This function checks the number of channels in the image and visualizes it accordingly.
         If the image has 3 channels, it is assumed to be an RGB image. If it has 4 channels, the last channel is assumed to be NIR (In this work context).
 
         Args:
-                
                 image (numpy.ndarray): The image to visualize.
                 figure_size (tuple): Size of the figure for visualization.
         Returns:
@@ -81,6 +83,52 @@ class Utils:
             plt.show()
 
     @staticmethod
+    def visualize_patches(loader: DataLoader, 
+                          how_many_patches: int = 4,
+                          path_to_save: str = None):
+        """
+        Visualize patches from a given DataLoader.
+
+        Parameters:
+            loader (DataLoader): DataLoader to visualize patches from.
+            how_many_patches (int): Number of patches to visualize.
+            path_to_save (str): Optional path to save the visualized patches.
+        """
+
+        images, masks = [], []
+        for x, y in loader:
+            for i in range(len(x)):
+                images.append(x[i].numpy())
+                masks.append(y[i].numpy())
+                if len(images) == how_many_patches:
+                    break
+            if len(images) == how_many_patches:
+                break
+
+        ncols = min(how_many_patches, 4)
+        nrows = (how_many_patches + ncols - 1) // ncols
+        fig, axs = plt.subplots(nrows=nrows * 2, ncols=ncols, figsize=(ncols * 4, nrows * 4))
+        axs = np.array(axs).reshape(nrows * 2, ncols)
+
+        for i in range(how_many_patches):
+            row = (i // ncols) * 2
+            col = i % ncols
+
+            axs[row, col].imshow(images[i]) #comes as (H, W, C)
+            axs[row, col].axis('off')
+            axs[row, col].set_title('RGB Image')
+
+            axs[row + 1, col].imshow(masks[i], cmap='gray')
+            axs[row + 1, col].axis('off')
+            axs[row + 1, col].set_title('Mask Image')
+
+        plt.tight_layout()
+        if path_to_save:
+            fig_path = os.path.join(path_to_save, f'{how_many_patches}_patches_examples.png')
+            plt.savefig(fig_path)
+        plt.close()
+
+    @staticmethod
     def extract_images_patches(rgb_image,
                             reference_image,
                             patch_len=256):
@@ -110,7 +158,7 @@ class Utils:
 
         rgb_image_patch = rgb_image_patch.reshape(-1, patch_len, patch_len, channel_n)
         reference_image_patch = reference_image_patch.reshape(-1, patch_len, patch_len)
-        print(f"🤖 The number of training patches is: {rgb_image_patch.shape[0]}")
+        print(f"🤖 The number of patches obtained is: {rgb_image_patch.shape[0]}")
         return rgb_image_patch, reference_image_patch
 
     @staticmethod
@@ -192,10 +240,16 @@ if __name__ == "__main__":
     reference_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/CHM.tif"
     split_size = 0.2
     batch_size = 16
+    visualize_patches = True
 
     dataset_preparer = PrepareDataset(source_tiff_path, reference_tiff_path, split_size, batch_size)
     train_loader, val_loader = dataset_preparer.get_train_val_loaders()
 
     for batch in train_loader:
         print(batch[0].shape, batch[1].shape)  # Print the shape of the images and masks in the batch
+        if visualize_patches:
+            Utils.visualize_patches(train_loader, 
+                                    how_many_patches=4,
+                                    path_to_save=os.path.dirname(source_tiff_path))
+            
         break  # Just to test the first batch
