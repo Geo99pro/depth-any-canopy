@@ -9,9 +9,7 @@ gdal.DontUseExceptions()
 from typing import Callable
 from torchvision import transforms as T
 from skimage.util import view_as_windows
-from torchgeo.datasets import NonGeoDataset
 from torch.utils.data import Dataset, DataLoader
-from torchgeo.datamodules import NonGeoDataModule
 from kornia.augmentation import AugmentationSequential
 from sklearn.model_selection import train_test_split
 #
