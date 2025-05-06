@@ -1,0 +1,201 @@
+import numpy as np
+import kornia
+import matplotlib.pyplot as plt
+from skimage.util import view_as_windows
+from typing import Callable
+from osgeo import gdal
+gdal.DontUseExceptions()
+
+from torchgeo.datasets import NonGeoDataset
+from torch.utils.data import Dataset, DataLoader
+from torchgeo.datamodules import NonGeoDataModule
+from kornia.augmentation import AugmentationSequential
+from sklearn.model_selection import train_test_split
+
+
+class Utils:
+    @staticmethod
+    def read_tiff(file_path):
+        data = gdal.Open(file_path).ReadAsArray()
+        if data.ndim == 3:
+            data = np.transpose(data, (1, 2, 0)) # Transpose to (height, width, channels)
+        elif data.ndim == 2:
+            data = np.array(data, dtype=np.float32)
+        return data
+    
+    @staticmethod
+    def visualize_dataset(image, figure_size=(8, 8), **args):
+        """
+        Visualize an image with RGB and NIR channels if available.
+        This function checks the number of channels in the image and visualizes it accordingly.
+        If the image has 3 channels, it is assumed to be an RGB image. If it has 4 channels, the last channel is assumed to be NIR (In this work context).
+
+        Args:
+                
+                image (numpy.ndarray): The image to visualize.
+                figure_size (tuple): Size of the figure for visualization.
+        Returns:
+                None. However, it displays the image.
+        """
+
+        if not isinstance(image, np.ndarray):
+            raise ValueError("Input image must be a numpy array.")
+        
+        image_shape = image.shape
+        if len(image_shape) > 2:
+            if image_shape[-1] == 3:
+                rgb_image = image[:, :, :3]
+                if np.max(rgb_image) > 1:
+                    rgb_image = rgb_image / 255.0
+                plt.imshow(rgb_image)
+                plt.title('RGB Image')
+                plt.axis('off')
+                plt.show()
+
+            elif image_shape[-1] == 4:
+                rgb_image = image[:, :, :3]
+                nir_image = image[:, :, 3]
+                #create a subplot with 2 images
+                if np.max(rgb_image) > 1:
+                    rgb_image = rgb_image / 255.0
+                if np.max(nir_image) > 1:
+                    nir_image = nir_image / 255.0
+                
+                _, (ax1, ax2) = plt.subplots(1, 2, figsize=figure_size)
+                ax1.imshow(rgb_image)
+                ax1.set_title('Ortofoto RGB Image')
+                ax1.axis('off')
+                ax2.imshow(nir_image, cmap=args.get('cmap', 'gray'))
+                ax2.set_title('Ortofoto NIR Image')
+                ax2.axis('off')
+                plt.tight_layout()
+                plt.show()
+
+        elif len(image_shape) == 2:
+            rgb_image = image
+            if np.max(rgb_image) > 1:
+                rgb_image = rgb_image / 255.0
+            plt.imshow(rgb_image, cmap = args.get('cmap', 'gray'))
+            plt.title(args.get('title', 'Canopy Height Map'))
+            plt.axis('off')
+            plt.show()
+
+    @staticmethod
+    def extract_images_patches(rgb_image,
+                            reference_image,
+                            patch_len=256):
+        """
+        Extract patches from the input image using a sliding window approach.
+        
+        Parameters:
+            channel (numpy.ndarray): Input image channel.
+            patch_len (int): Length of the patches to be extracted.
+        """
+        channel_n = 3
+        train_step = patch_len//2
+
+        print(f'The shape of the input image is: {rgb_image.shape}')
+        print(f'The shape of the reference image is: {reference_image.shape}')
+        print(f'The patch length is: {patch_len}')
+        print(f'The stride is: {train_step}')
+        print(f'The number of channels is: {channel_n}')
+
+        if np.max(rgb_image) > 1:
+            rgb_image = rgb_image / 255.0
+        if np.max(reference_image) > 1:
+            reference_image = reference_image / 255.0
+        
+        rgb_image_patch = view_as_windows(rgb_image, (patch_len, patch_len, channel_n), step=train_step)
+        reference_image_patch = view_as_windows(reference_image, (patch_len, patch_len), step=train_step)
+
+        rgb_image_patch = rgb_image_patch.reshape(-1, patch_len, patch_len, channel_n)
+        reference_image_patch = reference_image_patch.reshape(-1, patch_len, patch_len)
+        print(f"🤖 The number of training patches is: {rgb_image_patch.shape[0]}")
+        return rgb_image_patch, reference_image_patch
+
+    @staticmethod
+    def split_dataset(input: np.ndarray, 
+            reference: np.ndarray,
+            test_size: float = 0.2, 
+            random_state: int = 42):
+        """
+        Split the dataset into training and testing sets.
+
+        Parameters:
+            input (numpy.ndarray): Input images.
+            reference (numpy.ndarray): Reference images.
+            test_size (float): Proportion of the dataset to include in the test split.
+            random_state (int): Random seed for reproducibility.
+
+        Returns:
+            Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray]: Training and testing sets.
+        """
+        return train_test_split(input, reference, test_size=test_size, random_state=random_state)
+
+class CustomDataset(Dataset):
+    def __init__(self, rgb_patches, chm_patches, transform=None, transform_reference=None):
+        self.rgb_patches = rgb_patches
+        self.chm_patches = chm_patches
+        self.transform = transform
+        self.transform_reference = transform_reference
+
+    def __len__(self):
+        return len(self.rgb_patches)
+
+    def __getitem__(self, idx):
+        x = self.rgb_patches[idx]
+        y = self.chm_patches[idx]
+        
+        if self.transform:
+            x = self.transform(x)
+        if self.transform_reference:
+            y = self.transform_reference(y)
+        
+        return x, y
+
+class PrepareDataset:
+    def __init__(self, 
+                 source_tiff_path: str, 
+                 reference_tiff_path: str, 
+                 split_size: float, 
+                 batch_size: int, 
+                 transform: Callable = None, 
+                 patch_len=256):
+        self.source_tiff_path = source_tiff_path
+        self.reference_tiff_path = reference_tiff_path
+        self.split_size = split_size
+        self.batch_size = batch_size
+        self.transform = transform
+        self.patch_len = patch_len
+
+        self.rgb_image = Utils.read_tiff(self.source_tiff_path)[:, :, :3]
+        self.reference_image = Utils.read_tiff(self.reference_tiff_path)
+
+        self.rgb_patches, self.reference_patches = Utils.extract_images_patches(self.rgb_image, self.reference_image, patch_len=self.patch_len)
+
+        self.train_rgb, self.val_rgb, self.train_reference, self.val_rgb_reference = Utils.split_dataset(input=self.rgb_patches, reference=self.reference_patches, test_size=self.split_size)
+
+        train_dataset = CustomDataset(self.train_rgb, self.train_reference, transform=self.transform, transform_reference=None)
+        val_dataset = CustomDataset(self.val_rgb, self.val_rgb_reference, transform=self.transform, transform_reference=None)
+
+        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        self.val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
+
+    def get_train_val_loaders(self):
+        return self.train_loader, self.val_loader
+        
+
+
+if __name__ == "__main__":
+    # Example usage
+    source_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/RGBNIR.tif"
+    reference_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/CHM.tif"
+    split_size = 0.2
+    batch_size = 16
+
+    dataset_preparer = PrepareDataset(source_tiff_path, reference_tiff_path, split_size, batch_size)
+    train_loader, val_loader = dataset_preparer.get_train_val_loaders()
+
+    for batch in train_loader:
+        print(batch[0].shape, batch[1].shape)  # Print the shape of the images and masks in the batch
+        break  # Just to test the first batch
