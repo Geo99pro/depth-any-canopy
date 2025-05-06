@@ -1,17 +1,20 @@
 import os
+import torch
 import numpy as np
 import kornia
 import matplotlib.pyplot as plt
-from skimage.util import view_as_windows
-from typing import Callable
+
 from osgeo import gdal
 gdal.DontUseExceptions()
-
+from typing import Callable
+from torchvision import transforms as T
+from skimage.util import view_as_windows
 from torchgeo.datasets import NonGeoDataset
 from torch.utils.data import Dataset, DataLoader
 from torchgeo.datamodules import NonGeoDataModule
 from kornia.augmentation import AugmentationSequential
 from sklearn.model_selection import train_test_split
+#
 
 
 class Utils:
@@ -24,6 +27,42 @@ class Utils:
             data = np.array(data, dtype=np.float32)
         return data
     
+    @staticmethod
+    def apply_normalization(mean: tuple[float, float, float] = (0.420, 0.411, 0.296),
+                                  std: tuple[float, float, float] = (0.213, 0.156, 0.143),
+                                  is_input: bool = True) -> Callable:
+        if is_input:
+            return T.Compose([T.ToTensor(),
+                        T.Normalize(mean=mean, 
+                        std=std)])
+        else:
+            return T.ToTensor()
+
+    @staticmethod
+    def denormalize(tensor: torch.Tensor, 
+                mean: tuple[float, float, float] = (0.420, 0.411, 0.296),
+                std: tuple[float, float, float] = (0.213, 0.156, 0.143)) -> torch.Tensor:
+        """
+        Denormalize a tensor using the provided mean and standard deviation.
+
+        Args:
+            tensor (torch.Tensor): The input tensor to denormalize.
+            mean (tuple[float, float, float]): The mean values for each channel.
+            std (tuple[float, float, float]): The standard deviation values for each channel.
+        Returns:
+            torch.Tensor: The denormalized tensor.
+        """
+        mean = torch.tensor(mean, device=tensor.device).view(-1, 1, 1)
+        std = torch.tensor(std, device=tensor.device).view(-1, 1, 1)
+        return tensor * std + mean
+
+    @staticmethod
+    def get_augmentation_pipeline(mean: tuple[float, float, float] = (0.420, 0.411, 0.296),
+                                  std: tuple[float, float, float] = (0.213, 0.156, 0.143)) -> Callable:
+        return AugmentationSequential(
+            kornia.enhance.Normalize(mean=mean, std=std),
+            data_keys=["input"])
+
     @staticmethod
     def visualize_dataset(image,
                         figure_size=(8, 8),
@@ -98,7 +137,7 @@ class Utils:
         images, masks = [], []
         for x, y in loader:
             for i in range(len(x)):
-                images.append(x[i].numpy())
+                images.append(Utils.denormalize(x[i]).numpy())
                 masks.append(y[i].numpy())
                 if len(images) == how_many_patches:
                     break
@@ -107,20 +146,20 @@ class Utils:
 
         ncols = min(how_many_patches, 4)
         nrows = (how_many_patches + ncols - 1) // ncols
-        fig, axs = plt.subplots(nrows=nrows * 2, ncols=ncols, figsize=(ncols * 4, nrows * 4))
+        _, axs = plt.subplots(nrows=nrows * 2, ncols=ncols, figsize=(ncols * 4, nrows * 4))
         axs = np.array(axs).reshape(nrows * 2, ncols)
 
         for i in range(how_many_patches):
             row = (i // ncols) * 2
             col = i % ncols
 
-            axs[row, col].imshow(images[i]) #comes as (H, W, C)
+            axs[row, col].imshow(images[i].transpose(1, 2, 0) / 255.0) # CHW to HWC
             axs[row, col].axis('off')
-            axs[row, col].set_title('RGB Image')
+            axs[row, col].set_title('Satellite RGB Image')
 
-            axs[row + 1, col].imshow(masks[i], cmap='gray')
+            axs[row + 1, col].imshow(masks[i].squeeze(0), cmap='gray') #mask image comes with (1, H, W) shape
             axs[row + 1, col].axis('off')
-            axs[row + 1, col].set_title('Mask Image')
+            axs[row + 1, col].set_title('CHM Mask Image')
 
         plt.tight_layout()
         if path_to_save:
@@ -131,6 +170,7 @@ class Utils:
     @staticmethod
     def extract_images_patches(rgb_image,
                             reference_image,
+                            augmentation=None,
                             patch_len=256):
         """
         Extract patches from the input image using a sliding window approach.
@@ -148,10 +188,10 @@ class Utils:
         print(f'The stride is: {train_step}')
         print(f'The number of channels is: {channel_n}')
 
-        if np.max(rgb_image) > 1:
-            rgb_image = rgb_image / 255.0
-        if np.max(reference_image) > 1:
-            reference_image = reference_image / 255.0
+        # if np.max(rgb_image) > 1:
+        #     rgb_image = rgb_image / 255.0
+        # if np.max(reference_image) > 1:
+        #     reference_image = reference_image / 255.0
         
         rgb_image_patch = view_as_windows(rgb_image, (patch_len, patch_len, channel_n), step=train_step)
         reference_image_patch = view_as_windows(reference_image, (patch_len, patch_len), step=train_step)
@@ -180,12 +220,17 @@ class Utils:
         """
         return train_test_split(input, reference, test_size=test_size, random_state=random_state)
 
+
 class CustomDataset(Dataset):
-    def __init__(self, rgb_patches, chm_patches, transform=None, transform_reference=None):
+    def __init__(self, 
+                 rgb_patches, 
+                 chm_patches,
+                 input_transform=None,
+                 target_transform=None):
         self.rgb_patches = rgb_patches
         self.chm_patches = chm_patches
-        self.transform = transform
-        self.transform_reference = transform_reference
+        self.input_transform =  input_transform
+        self.target_transform = target_transform
 
     def __len__(self):
         return len(self.rgb_patches)
@@ -194,10 +239,10 @@ class CustomDataset(Dataset):
         x = self.rgb_patches[idx]
         y = self.chm_patches[idx]
         
-        if self.transform:
-            x = self.transform(x)
-        if self.transform_reference:
-            y = self.transform_reference(y)
+        if self.input_transform:
+            x = self.input_transform(x)
+        if self.target_transform:
+            y = self.target_transform(y)
         
         return x, y
 
@@ -207,13 +252,16 @@ class PrepareDataset:
                  reference_tiff_path: str, 
                  split_size: float, 
                  batch_size: int, 
-                 transform: Callable = None, 
+                 input_transform: Callable = None,
+                 target_transform: Callable = None, 
                  patch_len=256):
+        
         self.source_tiff_path = source_tiff_path
         self.reference_tiff_path = reference_tiff_path
         self.split_size = split_size
         self.batch_size = batch_size
-        self.transform = transform
+        self.input_transform = (Utils.apply_normalization(is_input=True) if input_transform is None else input_transform)
+        self.target_transform = (Utils.apply_normalization(is_input=False) if target_transform is None else target_transform)
         self.patch_len = patch_len
 
         self.rgb_image = Utils.read_tiff(self.source_tiff_path)[:, :, :3]
@@ -223,8 +271,8 @@ class PrepareDataset:
 
         self.train_rgb, self.val_rgb, self.train_reference, self.val_rgb_reference = Utils.split_dataset(input=self.rgb_patches, reference=self.reference_patches, test_size=self.split_size)
 
-        train_dataset = CustomDataset(self.train_rgb, self.train_reference, transform=self.transform, transform_reference=None)
-        val_dataset = CustomDataset(self.val_rgb, self.val_rgb_reference, transform=self.transform, transform_reference=None)
+        train_dataset = CustomDataset(self.train_rgb, self.train_reference, input_transform=self.input_transform, target_transform=self.target_transform)
+        val_dataset = CustomDataset(self.val_rgb, self.val_rgb_reference, input_transform=self.input_transform, target_transform=self.target_transform)
 
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         self.val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
@@ -235,7 +283,6 @@ class PrepareDataset:
 
 
 if __name__ == "__main__":
-    # Example usage
     source_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/RGBNIR.tif"
     reference_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/CHM.tif"
     split_size = 0.2
