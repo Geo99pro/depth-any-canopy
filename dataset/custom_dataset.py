@@ -218,7 +218,6 @@ class Utils:
         """
         return train_test_split(input, reference, test_size=test_size, random_state=random_state)
 
-
 class CustomDataset(Dataset):
     def __init__(self, 
                  rgb_patches, 
@@ -278,8 +277,6 @@ class PrepareDataset:
     def get_train_val_loaders(self):
         return self.train_loader, self.val_loader
         
-
-
 if __name__ == "__main__":
     source_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/RGBNIR.tif"
     reference_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/CHM.tif"
@@ -291,10 +288,10 @@ if __name__ == "__main__":
     train_loader, val_loader = dataset_preparer.get_train_val_loaders()
 
     for batch in train_loader:
-        print(batch[0].shape, batch[1].shape)  # Print the shape of the images and masks in the batch
+        print(batch[0].shape, batch[1].shape)
         if visualize_patches:
             Utils.visualize_patches(train_loader, 
                                     how_many_patches=4,
                                     path_to_save=os.path.dirname(source_tiff_path))
             
-        break  # Just to test the first batch
+        break
