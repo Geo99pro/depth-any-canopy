@@ -1,0 +1,10 @@
+encoder: vits
+min_depth: 0.000001
+max_depth: 1.0
+lr: 5e-6
+use_huggingface: False
+safetensor_path: D:/meus_codigos_doutourado/Depth-any-canopy/pretrained_model/depth-any-canopy-small.safetensors
+
+freeze_parts:
+  - pretrained
+  
