@@ -2,8 +2,11 @@ import os
 import torch
 import numpy as np
 import kornia
+import matplotlib
+matplotlib.use("Agg") 
 import matplotlib.pyplot as plt
 
+from PIL import Image
 from osgeo import gdal
 gdal.DontUseExceptions()
 from typing import Callable
@@ -12,7 +15,6 @@ from skimage.util import view_as_windows
 from torch.utils.data import Dataset, DataLoader
 from kornia.augmentation import AugmentationSequential
 from sklearn.model_selection import train_test_split
-#
 
 
 class Utils:
@@ -21,20 +23,23 @@ class Utils:
         data = gdal.Open(file_path).ReadAsArray()
         if data.ndim == 3:
             data = np.transpose(data, (1, 2, 0)) # Transpose to (height, width, channels)
+            data = np.array(data, dtype=np.uint8)
         elif data.ndim == 2:
-            data = np.array(data, dtype=np.float32)
+            data = np.array(data, dtype=np.uint8)
         return data
     
     @staticmethod
-    def apply_normalization(mean: tuple[float, float, float] = (0.420, 0.411, 0.296),
+    def apply_transformation(mean: tuple[float, float, float] = (0.420, 0.411, 0.296),
                                   std: tuple[float, float, float] = (0.213, 0.156, 0.143),
+                                  size: tuple[int, int] = (518, 518),
                                   is_input: bool = True) -> Callable:
         if is_input:
-            return T.Compose([T.ToTensor(),
-                        T.Normalize(mean=mean, 
-                        std=std)])
+            return T.Compose([T.Resize(size),
+                            T.ToTensor(),
+                            T.Normalize(mean=mean, std=std)])
         else:
-            return T.ToTensor()
+            return T.Compose([T.Resize(size),
+                              T.ToTensor()])
 
     @staticmethod
     def denormalize(tensor: torch.Tensor, 
@@ -151,7 +156,7 @@ class Utils:
             row = (i // ncols) * 2
             col = i % ncols
 
-            axs[row, col].imshow(images[i].transpose(1, 2, 0) / 255.0) # CHW to HWC
+            axs[row, col].imshow(np.clip(images[i].transpose(1, 2, 0), 0, 255)) # CHW to HWC
             axs[row, col].axis('off')
             axs[row, col].set_title('Satellite RGB Image')
 
@@ -185,11 +190,6 @@ class Utils:
         print(f'The patch length is: {patch_len}')
         print(f'The stride is: {train_step}')
         print(f'The number of channels is: {channel_n}')
-
-        # if np.max(rgb_image) > 1:
-        #     rgb_image = rgb_image / 255.0
-        # if np.max(reference_image) > 1:
-        #     reference_image = reference_image / 255.0
         
         rgb_image_patch = view_as_windows(rgb_image, (patch_len, patch_len, channel_n), step=train_step)
         reference_image_patch = view_as_windows(reference_image, (patch_len, patch_len), step=train_step)
@@ -236,6 +236,15 @@ class CustomDataset(Dataset):
         x = self.rgb_patches[idx]
         y = self.chm_patches[idx]
         
+        if x.ndim == 3:
+            x = Image.fromarray(x)
+        else: 
+            raise ValueError("Invalid image dimensions. Expected 3D for RGB.")
+        if y.ndim == 2:
+            y = Image.fromarray(y)
+        else:
+            raise ValueError("Invalid image dimensions. Expected 2D for CHM.")
+        
         if self.input_transform:
             x = self.input_transform(x)
         if self.target_transform:
@@ -247,51 +256,88 @@ class PrepareDataset:
     def __init__(self, 
                  source_tiff_path: str, 
                  reference_tiff_path: str, 
-                 split_size: float, 
-                 batch_size: int, 
+                 split_size: float,
+                 mean: tuple[float, float, float] = [0.485, 0.456, 0.406],
+                 std: tuple[float, float, float] = [0.229, 0.224, 0.225],
+                 resize: list[int] = [518, 518],
+                 batch_size: int = 16,
+                 num_workers : int = 1,
+                 patch_len: int = 256,
+                 visualize_patches: bool = False,
                  input_transform: Callable = None,
-                 target_transform: Callable = None, 
-                 patch_len=256):
+                 target_transform: Callable = None):
         
         self.source_tiff_path = source_tiff_path
         self.reference_tiff_path = reference_tiff_path
         self.split_size = split_size
+        self.mean = mean
+        self.std = std
+        self.resize = resize
         self.batch_size = batch_size
-        self.input_transform = (Utils.apply_normalization(is_input=True) if input_transform is None else input_transform)
-        self.target_transform = (Utils.apply_normalization(is_input=False) if target_transform is None else target_transform)
+        self.num_workers = num_workers
         self.patch_len = patch_len
+        self.visualize_patches = visualize_patches
+        self.input_transform = (Utils.apply_transformation(mean=self.mean,
+                                                        std= self.std, 
+                                                        size=self.resize,
+                                                        is_input=True) if input_transform is None else input_transform)
+
+        self.target_transform = (Utils.apply_transformation(mean=self.mean,
+                                                        std= self.std,
+                                                        size=self.resize,
+                                                        is_input=False) if target_transform is None else target_transform)
 
         self.rgb_image = Utils.read_tiff(self.source_tiff_path)[:, :, :3]
         self.reference_image = Utils.read_tiff(self.reference_tiff_path)
 
-        self.rgb_patches, self.reference_patches = Utils.extract_images_patches(self.rgb_image, self.reference_image, patch_len=self.patch_len)
+        self.rgb_patches, self.reference_patches = Utils.extract_images_patches(self.rgb_image, self.reference_image, patch_len=self.patch_len) #✅
 
-        self.train_rgb, self.val_rgb, self.train_reference, self.val_rgb_reference = Utils.split_dataset(input=self.rgb_patches, reference=self.reference_patches, test_size=self.split_size)
+        self.train_rgb, self.val_rgb, self.train_reference, self.val_rgb_reference = Utils.split_dataset(input=self.rgb_patches, 
+                                                                                                        reference=self.reference_patches, 
+                                                                                                        test_size=self.split_size)
 
         train_dataset = CustomDataset(self.train_rgb, self.train_reference, input_transform=self.input_transform, target_transform=self.target_transform)
         val_dataset = CustomDataset(self.val_rgb, self.val_rgb_reference, input_transform=self.input_transform, target_transform=self.target_transform)
 
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-        self.val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
+        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        self.val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
+        if self.visualize_patches:
+            print("Visualizing patches...")
+            Utils.visualize_patches(loader=self.train_loader, how_many_patches=8, path_to_save=os.path.dirname(self.source_tiff_path))
+    
     def get_train_val_loaders(self):
         return self.train_loader, self.val_loader
-        
-if __name__ == "__main__":
-    source_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/RGBNIR.tif"
-    reference_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/CHM.tif"
-    split_size = 0.2
-    batch_size = 16
-    visualize_patches = True
+     
+# if __name__ == "__main__":
+#     source_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/RGBNIR.tif"
+#     reference_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/CHM.tif"
+#     split_size = 0.2
+#     mean = [0.485, 0.456, 0.406]
+#     std = [0.229, 0.224, 0.225]
+#     resize = [518, 518]
+#     batch_size = 16
+#     num_workers = 1
+#     patch_len = 256
+#     visualize_patches = True
 
-    dataset_preparer = PrepareDataset(source_tiff_path, reference_tiff_path, split_size, batch_size)
-    train_loader, val_loader = dataset_preparer.get_train_val_loaders()
+#     dataset_preparer = PrepareDataset(source_tiff_path=source_tiff_path, 
+#                                     reference_tiff_path=reference_tiff_path, 
+#                                     split_size=split_size,
+#                                     mean=mean,
+#                                     std=std,
+#                                     resize=resize,
+#                                     batch_size=batch_size,
+#                                     num_workers=num_workers,
+#                                     patch_len=patch_len,
+#                                     visualize_patches=visualize_patches)
+#     train_loader, val_loader = dataset_preparer.get_train_val_loaders()
 
-    for batch in train_loader:
-        print(batch[0].shape, batch[1].shape)
-        if visualize_patches:
-            Utils.visualize_patches(train_loader, 
-                                    how_many_patches=4,
-                                    path_to_save=os.path.dirname(source_tiff_path))
+#     for batch in train_loader:
+#         print(batch[0].shape, batch[1].shape)
+#         if visualize_patches:
+#             Utils.visualize_patches(train_loader, 
+#                                     how_many_patches=8,
+#                                     path_to_save=os.path.dirname(source_tiff_path))
             
-        break
+#         break
