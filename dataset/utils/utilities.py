@@ -24,21 +24,27 @@ class Utils:
             data = np.transpose(data, (1, 2, 0)) # Transpose to (height, width, channels)
             data = np.array(data, dtype=np.uint8)
         elif data.ndim == 2:
-            data = np.array(data, dtype=np.uint8)
+            data = np.array(data)
         return data
     
     @staticmethod
     def apply_transformation(mean: tuple[float, float, float] = (0.420, 0.411, 0.296),
                             std: tuple[float, float, float] = (0.213, 0.156, 0.143),
                             size: tuple[int, int] = (518, 518),
-                            is_input: bool = True) -> Callable:
+                            is_input: bool = True,
+                            is_mask: bool = False) -> Callable:
+        
+        """
+        Return a transformation pipeline for RGB, label (CHM), or binary mask.
+        """
         if is_input:
-            return T.Compose([T.Resize(size),
+            return T.Compose([T.Resize(size, interpolation=T.InterpolationMode.BILINEAR),
                             T.ToTensor(),
                             T.Normalize(mean=mean, std=std)])
         else:
-            return T.Compose([T.Resize(size),
-                              T.ToTensor()])
+            interpolation_mode = T.InterpolationMode.NEAREST if is_mask else T.InterpolationMode.BILINEAR
+            return T.Compose([T.Resize(size, interpolation=interpolation_mode),
+                            T.ToTensor()])
 
     @staticmethod
     def denormalize(tensor: torch.Tensor, 
@@ -161,11 +167,11 @@ class Utils:
 
         ncols = min(how_many_patches, 4)
         nrows = (how_many_patches + ncols - 1) // ncols
-        _, axs = plt.subplots(nrows=nrows * 3, ncols=ncols, figsize=(ncols * 4, nrows * 4 * 1.5))
-        axs = np.array(axs).reshape(nrows * 3, ncols)
+        _, axs = plt.subplots(nrows=nrows * 4, ncols=ncols, figsize=(ncols * 4, nrows * 4 * 1.5))
+        axs = np.array(axs).reshape(nrows * 4, ncols)
 
         for i in range(how_many_patches):
-            row = (i // ncols) * 3
+            row = (i // ncols) * 4
             col = i % ncols
 
             axs[row, col].imshow(np.clip(images[i].transpose(1, 2, 0), 0, 255)) # CHW to HWC
@@ -179,6 +185,11 @@ class Utils:
             axs[row + 2, col].imshow(mask[i].squeeze(0), cmap='gray', alpha=0.5) #mask image comes with (1, H, W) shape
             axs[row + 2, col].axis('off')
             axs[row + 2, col].set_title('NDVI Binary Mask Overlay')
+
+            axs[row + 3, col].imshow(mask[i].squeeze(0)*labels[i].squeeze(0), cmap='plasma', alpha=0.5)
+            axs[row + 3, col].axis('off')
+            axs[row + 3, col].set_title('Masked CHM Image')
+            axs[row + 3, col].set_xlabel(f'Patch {i + 1}')
 
 
         plt.tight_layout()
@@ -308,7 +319,8 @@ class Utils:
         if np.max(nir_image) > 1:
             nir_image = nir_image / 255.0
         ndvi  = (nir_image - red_channel) / (nir_image + red_channel + 1e-8)
-        binary_mask = np.where(ndvi  > ndvi_threshold, 1, 0).astype(np.uint8)
+        binary_mask = np.where(ndvi  > ndvi_threshold, 1, 0).astype(np.float32)
+
         if path_to_save:
             Utils.visualize_dataset(binary_mask, figure_size=figure_size, path_to_save=path_to_save, title='Binary Mask', cmap='gray')
             plt.figure(figsize=figure_size)
