@@ -1,6 +1,10 @@
 import os
-from PIL import Image
+import sys
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), './././'))
+sys.path.append(project_root)
+
 from utils.utilities import Utils
+from PIL import Image
 from typing import Callable
 from torch.utils.data import Dataset, DataLoader
 
@@ -15,9 +19,9 @@ class CustomDataset(Dataset):
         self.rgb_patches = rgb_patches
         self.chm_patches = chm_patches
         self.mask_patches = mask_patches
-        self.input_transform =  input_transform
-        self.target_transform = target_transform
-        self.mask_transform = mask_transform
+        self.transform_rgb  =  input_transform
+        self.transform_chm = target_transform
+        self.transform_mask = mask_transform
 
     def __len__(self):
         return len(self.rgb_patches)
@@ -40,12 +44,12 @@ class CustomDataset(Dataset):
         else:
             raise ValueError("Invalid image dimensions. Expected 2D for mask.")
         
-        if self.input_transform:
-            x = self.input_transform(x)
-        if self.target_transform:
-            y = self.target_transform(y)
-        if self.mask_transform:
-            mask = self.mask_transform(mask)
+        if self.transform_rgb :
+            x = self.transform_rgb (x)
+        if self.transform_chm:
+            y = self.transform_chm(y)
+        if self.transform_mask:
+            mask = self.transform_mask(mask)
         return x, y, mask
 
 class PrepareDataset:
@@ -61,9 +65,9 @@ class PrepareDataset:
                  ndvi_threshold: float = 0.5,
                  patch_len: int = 256,
                  visualize_patches: bool = False,
-                 input_transform: Callable = None,
-                 target_transform: Callable = None,
-                 mask_transform: Callable = None):
+                 transform_rgb: Callable = None,
+                 transform_chm: Callable = None,
+                 transform_mask: Callable = None):
         """ 
         Args:
             source_tiff_path (str): Path to the source TIFF file.
@@ -76,9 +80,9 @@ class PrepareDataset:
             num_workers (int): Number of workers for DataLoader.
             patch_len (int): Length of the patches to be extracted from the images.
             visualize_patches (bool): Whether to visualize the patches or not.
-            input_transform (Callable): Transformations to be applied to the input images.
-            target_transform (Callable): Transformations to be applied to the target images.
-            mask_transform (Callable): Transformations to be applied to the masks.
+            transform_rgb (Callable): Transformations to be applied to the input images.
+            transform_chm (Callable): Transformations to be applied to the target images.
+            transform_mask (Callable): Transformations to be applied to the masks.
         """
         
         self.source_tiff_path = source_tiff_path
@@ -92,21 +96,22 @@ class PrepareDataset:
         self.ndvi_threshold = ndvi_threshold
         self.patch_len = patch_len
         self.visualize_patches = visualize_patches
-        self.input_transform = (Utils.apply_transformation(mean=self.mean,
+        self.transform_rgb  = (Utils.apply_transformation(mean=self.mean,
                                                         std= self.std, 
                                                         size=self.resize,
-                                                        is_input=True) if input_transform is None else input_transform)
+                                                        is_input=True) if transform_rgb is None else transform_rgb)
 
-        self.target_transform = (Utils.apply_transformation(mean=self.mean,
+        self.transform_chm = (Utils.apply_transformation(mean=self.mean,
                                                         std= self.std,
                                                         size=self.resize,
-                                                        is_input=False) if target_transform is None else target_transform)
+                                                        is_input=False) if transform_chm is None else transform_chm)
 
-        self.mask_transform = (Utils.apply_transformation(mean=self.mean,
+        self.transform_mask = (Utils.apply_transformation(mean=self.mean,
                                                         std= self.std,
                                                         size=self.resize,
-                                                        is_input=False) if mask_transform is None else mask_transform)
-        
+                                                        is_input=False,
+                                                        is_mask=True) if transform_mask is None else transform_mask)
+
         self.image = Utils.read_tiff(self.source_tiff_path)
         self.rgb_image = self.image[:, :, :3]
         self.nir_image = self.image[:, :, 3]
@@ -121,6 +126,7 @@ class PrepareDataset:
                                                                                                    self.reference_image,self.binary_mask,
                                                                                                    patch_len=self.patch_len,
                                                                                                    stride_ratio=0.25) #✅
+        
         all_indices = list(range(len(self.rgb_patches)))
         train_indices, val_indices = Utils.split_dataset_indices(all_indices, self.split_size)
 
@@ -131,8 +137,8 @@ class PrepareDataset:
         self.train_mask = self.mask_patches[train_indices]
         self.val_mask = self.mask_patches[val_indices]
 
-        train_dataset = CustomDataset(self.train_rgb, self.train_reference, self.train_mask, input_transform=self.input_transform, target_transform=self.target_transform, mask_transform=self.mask_transform)
-        val_dataset = CustomDataset(self.val_rgb, self.val_reference, self.val_mask, input_transform=self.input_transform, target_transform=self.target_transform, mask_transform=self.mask_transform)
+        train_dataset = CustomDataset(self.train_rgb, self.train_reference, self.train_mask, input_transform=self.transform_rgb , target_transform=self.transform_chm, mask_transform=self.transform_mask)
+        val_dataset = CustomDataset(self.val_rgb, self.val_reference, self.val_mask, input_transform=self.transform_rgb , target_transform=self.transform_chm, mask_transform=self.transform_mask)
 
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
         self.val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
@@ -172,9 +178,9 @@ class PrepareDataset:
 
 #     for batch in train_loader:
 #         print(batch[0].shape, batch[1].shape, batch[2].shape)
-#         if visualize_patches:
-#             Utils.visualize_patches(train_loader, 
-#                                     how_many_patches=8,
-#                                     path_to_save=os.path.dirname(source_tiff_path))
-            
+#         # if visualize_patches:
+#         #     Utils.visualize_patches(train_loader, 
+#         #                             how_many_patches=8,
+#         #                             path_to_save=os.path.dirname(source_tiff_path))
+#         #
 #         break
