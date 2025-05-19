@@ -183,7 +183,7 @@ class Utils:
 
         plt.tight_layout()
         if path_to_save:
-            fig_path = os.path.join(path_to_save, f'{how_many_patches}patches_visualization.png')
+            fig_path = os.path.join(path_to_save, f'{how_many_patches}_patches_visualization.png')
             plt.savefig(fig_path)
             print(f"🖼️ Patches saved under: {fig_path}")
         plt.close()
