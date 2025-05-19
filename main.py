@@ -29,7 +29,7 @@ def main(args: DictConfig):
             api_key="9gB1lNby6NfLqBASYqyTh7oaD",
             workspace="depth-any-canopy-test-1",
             project="depth-any-canopy",
-            experiment_name=f"depth-any-canopy-{experiment_id}",
+            name=f"depth-any-canopy-{experiment_id}",
             mode="create",
             online=True,
         )
@@ -63,9 +63,7 @@ def main(args: DictConfig):
         val_check_interval=1.0,
     )
 
-    trainer.fit(model, 
-                train_dataloaders=train_dataset, 
-                val_dataloaders=val_dataset)
+    trainer.fit(model, train_dataloaders=train_dataset, val_dataloaders=val_dataset)
 
 
 if __name__ == "__main__":
