@@ -151,12 +151,15 @@ class DepthAnythingV2Module(LightningModule):
         if pred.ndim == 3:
              pred = pred.unsqueeze(1)
         pred = resize(pred, depth.shape[-2:], interpolation="bilinear").clamp(self.hparams.min_depth, self.hparams.max_depth)
-        
+        percent_masked = (mask.sum() / mask.numel()).item()
         pixel_loss = self.loss(pred, depth)
         masked_loss = pixel_loss * mask
         loss = masked_loss.sum() / mask.sum().clamp(min=1)
         #loss = self.loss(pred, depth)
         self.log("train_loss", loss)
+        self.log("percent_masked", percent_masked)
+        self.metric(pred, depth)
+        self.log_dict(self.metric)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -173,6 +176,7 @@ class DepthAnythingV2Module(LightningModule):
         if pred.ndim == 3:
             pred = pred.unsqueeze(1)
         pred = resize(pred, depth.shape[-2:], interpolation="bilinear").clamp(self.hparams.min_depth, self.hparams.max_depth)
+        percent_masked = (mask.sum() / mask.numel()).item()
 
         #loss = self.loss(pred, depth)
         pixel_loss = self.loss(pred, depth)
