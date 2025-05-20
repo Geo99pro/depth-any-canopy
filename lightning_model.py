@@ -89,7 +89,7 @@ class DepthAnythingV2Module(LightningModule):
             ).train()
 
         self.loss = nn.MSELoss(reduction="none")
-        #self.another_loss = F.huber_loss()
+        self.h_loss = nn.HuberLoss(reduction="none")
         self.metric = MetricCollection(
             [regression.MeanSquaredError(),
              regression.MeanAbsoluteError(),
@@ -117,6 +117,25 @@ class DepthAnythingV2Module(LightningModule):
         return {"optimizer": optimizer,
                 "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
     
+    def masked_huber_loss(self, pred: torch.Tensor,
+                        target: torch.Tensor,
+                        mask: torch.Tensor,
+                        delta: float = 1.0):
+        """
+        Compute the masked Huber loss only on masked regions.
+        Args:
+            pred (torch.Tensor): Predicted depth map, shape (B, 1, H, W).
+            target (torch.Tensor): Target depth map, shape (B, 1, H, W).
+            mask (torch.Tensor): Mask indicating valid regions, shape (B, 1, H, W), values in {0, 1}.
+            delta (float): Threshold for Huber loss.
+
+        Returns:
+            torch.Tensor: Masked Huber loss.
+        """
+        pixel_loss = self.h_loss(pred, target, delta=delta)
+        masked_loss = pixel_loss * mask
+        return masked_loss.sum() / mask.sum().clamp(min=1)
+
     def masked_mse_loss(self,
                         pred: torch.Tensor,
                         target: torch.Tensor, 
@@ -147,17 +166,14 @@ class DepthAnythingV2Module(LightningModule):
         img, depth, mask = batch[0], torch.clamp(batch[1], min=self.hparams.min_depth, max=self.hparams.max_depth), batch[2]
         out = self.model(img)
         pred = out.predicted_depth if hasattr(out, "predicted_depth") else out
-  
         if pred.ndim == 3:
              pred = pred.unsqueeze(1)
         pred = resize(pred, depth.shape[-2:], interpolation="bilinear").clamp(self.hparams.min_depth, self.hparams.max_depth)
         percent_masked = (mask.sum() / mask.numel()).item()
-        pixel_loss = self.loss(pred, depth)
-        masked_loss = pixel_loss * mask
-        loss = masked_loss.sum() / mask.sum().clamp(min=1)
-        #loss = self.loss(pred, depth)
+        loss = self.masked_mse_loss(pred, depth, mask)
+        # loss = self.masked_huber_loss(pred, depth, mask)
         self.log("train_loss", loss)
-        self.log("percent_masked", percent_masked)
+        self.log("train_percent_masked", percent_masked)
         self.metric(pred, depth)
         self.log_dict(self.metric)
         return loss
@@ -171,51 +187,36 @@ class DepthAnythingV2Module(LightningModule):
         img, depth, mask = batch[0], torch.clamp(batch[1], min=self.hparams.min_depth, max=self.hparams.max_depth), batch[2]
         out = self.model(img)
         pred = out.predicted_depth if hasattr(out, "predicted_depth") else out
-        # pred = self.model(img).predicted_depth
-
         if pred.ndim == 3:
             pred = pred.unsqueeze(1)
         pred = resize(pred, depth.shape[-2:], interpolation="bilinear").clamp(self.hparams.min_depth, self.hparams.max_depth)
         percent_masked = (mask.sum() / mask.numel()).item()
-
-        #loss = self.loss(pred, depth)
-        pixel_loss = self.loss(pred, depth)
-        masked_loss = pixel_loss * mask
-        loss = masked_loss.sum() / mask.sum().clamp(min=1)
+        loss = self.masked_mse_loss(pred, depth, mask)
+        # loss = self.masked_huber_loss(pred, depth, mask)
         self.log("val_loss", loss)
+        self.log("val_percent_masked", percent_masked)
         self.metric(pred, depth)
         self.log_dict(self.metric)
 
         if batch_idx < 10 and self.logger is not None:
-            fig = self.plot(
-                img[0].cpu().detach(),
-                depth[0].cpu().detach(),
-                pred[0].cpu().detach(),
-                mask[0].cpu().detach())
-
-            self.logger.experiment.log_figure(
-                figure=fig, figure_name=f"val_{batch_idx}"
-            )
+            fig = self.plot(img[0].cpu().detach(), depth[0].cpu().detach(), pred[0].cpu().detach(), mask[0].cpu().detach())
+            self.logger.experiment.log_figure(figure=fig, figure_name=f"val_{batch_idx}")
             plt.close(fig)
-
         return loss
 
     def test_step(self, batch, batch_idx):
-        img, depth = self._preprocess_batch(batch)
-
+        img, depth, mask = batch[0], torch.clamp(batch[1], min=self.hparams.min_depth, max=self.hparams.max_depth), batch[2]
+        img = resize(img, (518, 518), interpolation="bilinear")
         pred = self.model(img).predicted_depth
-
-        pred = resize(pred, depth.shape[-2:], interpolation="bilinear").clamp(0, 1)
-
+        if pred.ndim == 3:
+            pred = pred.unsqueeze(1)
+        pred = resize(pred, depth.shape[-2:], interpolation="bilinear").clamp(self.hparams.min_depth, self.hparams.max_depth)
+        loss = self.masked_mse_loss(pred, depth, mask)
+        self.log("test_loss", loss)
         self.metric(pred, depth)
         self.log_dict(self.metric)
-
         self.classification_metrics(pred > 1e-4, depth > 1e-4)
         self.log_dict(self.classification_metrics)
-
-        # self.corr(pred[depth > 1e-4].flatten(), depth[depth > 1e-4].flatten())
-        # self.log_dict(self.corr)
-
         self.predictions.append(
             {
                 "prediction": pred[depth > 1e-4].flatten().detach().cpu(),
@@ -224,12 +225,12 @@ class DepthAnythingV2Module(LightningModule):
         )
 
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
-        img, depth = self._preprocess_batch(batch)
-
+        img, depth, mask = batch[0], torch.clamp(batch[1], min=self.hparams.min_depth, max=self.hparams.max_depth), batch[2]
+        img = resize(img, (518, 518), interpolation="bilinear")
+        if img.ndim == 3:
+            img = img.unsqueeze(0)
         pred = self.model(img).predicted_depth
-
-        pred = resize(pred, depth.shape[-2:], interpolation="bilinear").clamp(0, 1)
-
+        pred = resize(pred, depth.shape[-2:], interpolation="bilinear").clamp(self.hparams.min_depth, self.hparams.max_depth)
         return pred
 
     def _preprocess_batch(self, batch):
