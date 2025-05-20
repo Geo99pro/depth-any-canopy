@@ -145,7 +145,7 @@ class PrepareDataset:
 
         if self.visualize_patches:
             print("Visualizing patches...")
-            Utils.visualize_patches(loader=self.train_loader, how_many_patches=8, path_to_save=os.path.dirname(self.source_tiff_path))
+            Utils.visualize_patches(loader=self.train_loader, how_many_patches=4, path_to_save=os.path.dirname(self.source_tiff_path))
     
     def get_train_val_loaders(self):
         return self.train_loader, self.val_loader
