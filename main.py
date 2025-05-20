@@ -1,7 +1,7 @@
 import time
+import comet_ml
 import torch
 import hydra
-import comet_ml
 import lightning as pl
 
 from omegaconf import DictConfig
@@ -29,7 +29,7 @@ def main(args: DictConfig):
             api_key="9gB1lNby6NfLqBASYqyTh7oaD",
             workspace="depth-any-canopy-test-1",
             project="depth-any-canopy",
-            name=f"depth-any-canopy-{experiment_id}",
+            name=f"depth-any-canopy-{experiment_id}_04_ndvi-threshold",
             mode="create",
             online=True,
         )
