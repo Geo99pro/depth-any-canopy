@@ -186,7 +186,7 @@ class Utils:
             axs[row + 2, col].axis('off')
             axs[row + 2, col].set_title('NDVI Binary Mask Overlay')
 
-            axs[row + 3, col].imshow(mask[i].squeeze(0)*labels[i].squeeze(0), cmap='plasma', alpha=0.5)
+            axs[row + 3, col].imshow(mask[i].squeeze(0)*labels[i].squeeze(0), cmap='viridis', alpha=0.5)
             axs[row + 3, col].axis('off')
             axs[row + 3, col].set_title('Masked CHM Image')
             axs[row + 3, col].set_xlabel(f'Patch {i + 1}')
@@ -200,17 +200,58 @@ class Utils:
         plt.close()
 
     @staticmethod
+    def visualize_histogram(image: np.ndarray, 
+                                bins: int = 256,  
+                                title: str = 'Histogram', 
+                                xlabel: str = 'Pixel Value', 
+                                ylabel: str = 'Frequency',
+                                path_to_save: str = None,
+                                name: str = 'histogram'):
+        """
+        Visualize the histogram of an image.
+        
+        Parameters:
+            image (numpy.ndarray): Input image.
+            bins (int): Number of bins for the histogram.
+            title (str): Title of the histogram plot.
+            xlabel (str): X-axis label.
+            ylabel (str): Y-axis label.
+            path_to_save (str): Optional path to save the histogram plot.
+            name (str): Name of the histogram plot file.
+            
+        Returns:
+            None. However, it saves the histogram plot if a path is provided.
+        """
+        plt.figure(figsize=(10, 6))
+        plt.hist(image.ravel(), bins=bins, color='blue', alpha=0.7)
+        plt.title(title)
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.grid()
+        if path_to_save:
+            figure_path = os.path.join(path_to_save, f'{name}.png')
+            plt.savefig(figure_path)
+            print(f"🖼️ Histogram saved under: {figure_path}")
+        plt.close()
+
+    @staticmethod
     def extract_images_patches(rgb_image,
                             reference_image,
                             binary_mask_image: np.ndarray,
-                            patch_len: int = 256,
+                            patch_len: int = 518,
                             stride_ratio: float = 0.5):
         """
         Extract patches from the input image using a sliding window approach.
         
         Parameters:
-            channel (numpy.ndarray): Input image channel.
+            rgb_image (numpy.ndarray): Input RGB image.
+            reference_image (numpy.ndarray): Reference image (e.g., CHM).
+            binary_mask_image (numpy.ndarray): Binary mask image obtained from the NIR image.
             patch_len (int): Length of the patches to be extracted.
+            stride_ratio (float): Ratio of the stride length to the patch length. 0.5 means 50% overlap, 0.25 means 75% overlap, 0.15 means 85% overlap.
+
+        Returns:
+            Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]: Patches of RGB image, reference image, and binary mask image.
         """
         channel_n = 3
         train_step = int(patch_len * stride_ratio)
@@ -299,7 +340,7 @@ class Utils:
     @staticmethod
     def get_binary_mask(nir_image: np.ndarray,
                         rgb_image: np.ndarray,
-                        ndvi_threshold: float = 0.5,
+                        threshold: float = 0.2,
                         figure_size: tuple[int, int] = (8, 8),
                         path_to_save: str = None) -> np.ndarray:
         """
@@ -308,7 +349,7 @@ class Utils:
         Parameters:
             nir_image (numpy.ndarray): NIR image.
             rgb_image (numpy.ndarray): RGB image.
-            ndvi_threshold (float): Threshold for binary mask.
+            threshold (float): Threshold for binary mask.
 
         Returns:
             Tuple[numpy.ndarray, numpy.ndarray]: Binary mask and NDVI.
@@ -319,7 +360,7 @@ class Utils:
         if np.max(nir_image) > 1:
             nir_image = nir_image / 255.0
         ndvi  = (nir_image - red_channel) / (nir_image + red_channel + 1e-8)
-        binary_mask = np.where(ndvi  > ndvi_threshold, 1, 0).astype(np.float32)
+        binary_mask = np.where(ndvi  > threshold, 1, 0).astype(np.float32)
 
         if path_to_save:
             Utils.visualize_dataset(binary_mask, figure_size=figure_size, path_to_save=path_to_save, title='Binary Mask', cmap='gray')
@@ -331,3 +372,124 @@ class Utils:
             plt.savefig(os.path.join(path_to_save, 'binary_mask_overlay.png'))
             plt.close()
         return binary_mask, ndvi
+    
+    @staticmethod
+    def get_min_max_depth(ndvi_image: np.ndarray,
+                          binary_mask_image: np.ndarray,
+                          reference_image: np.ndarray) -> tuple[float, float]:
+        """
+        Calculate the minimum and maximum depth from the NDVI image, binary mask image, and reference image.
+        Parameters:
+            ndvi_image (numpy.ndarray): NDVI image.
+            binary_mask_image (numpy.ndarray): Binary mask image obtained from the NIR image.
+            reference_image (numpy.ndarray): Reference image (e.g., CHM).
+
+        Returns:
+
+            Tuple[float, float]: Minimum and maximum depth.
+        """
+        reference_image = reference_image/255 if np.max(reference_image) > 1 else reference_image
+        result = ndvi_image * binary_mask_image * reference_image
+        return np.min(result), np.max(result)
+    
+    @staticmethod
+    def _side_handler(image: np.ndarray, which_half: str = 'top', axis: int = 0) -> np.ndarray:
+        """
+        Generic side handler for splitting an image along a specified axis.
+        """
+        split_index = image.shape[axis] // 2
+        slicer = [slice(None)] * image.ndim
+        if which_half == 'top':
+            slicer[axis] = slice(0, split_index)
+        elif which_half == 'bottom':
+            slicer[axis] = slice(split_index, None)
+        else:
+            raise ValueError("Invalid 'which_half'. Use 'top' or 'bottom'.")
+        return image[tuple(slicer)]
+
+    @staticmethod
+    def split_images(rgb_image: np.ndarray,
+                    ndvi_mask_image: np.ndarray,
+                    binary_mask_image: np.ndarray,
+                    reference_image: np.ndarray,
+                    split_type: str = 'horizontal',
+                    path_to_save: str = None,
+                    figure_size: tuple[int, int] = (8, 8)) -> dict:
+        """
+        Split the RGB image into two parts based on the split type.
+        
+        Parameters:
+            rgb_image (numpy.ndarray): Input RGB image.
+            ndvi_image (numpy.ndarray): NDVI image.
+            binary_mask_image (numpy.ndarray): Binary mask image obtained from the NIR image.
+            reference_image (numpy.ndarray): Reference image (e.g., CHM).
+            split_type (str): Type of split ('horizontal' or 'vertical').
+        
+        Returns:
+            dict: Metadata for the top and bottom halves of the split images.
+        """
+        for img in [rgb_image, ndvi_mask_image, binary_mask_image, reference_image]:
+            if not isinstance(img, np.ndarray):
+                raise ValueError("All images must be numpy arrays.")
+        
+        if not (rgb_image.shape[:2] == ndvi_mask_image.shape[:2] == binary_mask_image.shape[:2] == reference_image.shape[:2]):
+            raise ValueError("All images must have the same spatial dimensions.")
+        
+        if split_type == 'horizontal':
+            axis = 0 # Split along the height
+        elif split_type == 'vertical':
+            axis = 1 # Split along the width
+        else:
+            raise ValueError("Invalid split type. Use 'horizontal' or 'vertical'.")
+        
+        metadata = {}
+
+        for half in ['top', 'bottom']:
+            rgb_half = Utils._side_handler(rgb_image, half, axis)
+            ndvi_half = Utils._side_handler(ndvi_mask_image, half, axis)
+            binary_mask_half = Utils._side_handler(binary_mask_image, half, axis)
+            reference_half = Utils._side_handler(reference_image, half, axis)
+
+            min_depth, max_depth = Utils.get_min_max_depth(ndvi_half, binary_mask_half, reference_half)
+            metadata[half] = {
+                'rgb_image': rgb_half,
+                'ndvi_image': ndvi_half,
+                'binary_mask_image': binary_mask_half,
+                'reference_image': reference_half,
+                "masked_ndvi_chm_image": ndvi_half * binary_mask_half * (reference_half / 255 if np.max(reference_half) > 1 else reference_half),
+                'min_depth': min_depth,
+                'max_depth': max_depth
+            }
+
+            if path_to_save:
+                Utils.visualize_dataset(rgb_half, figure_size=figure_size, path_to_save=path_to_save, title=f'RGB Image - {half.capitalize()} Half')
+                Utils.visualize_dataset(ndvi_half, figure_size=figure_size, path_to_save=path_to_save, title=f'NDVI Image - {half.capitalize()} Half')
+                Utils.visualize_dataset(binary_mask_half, figure_size=figure_size, path_to_save=path_to_save, title=f'Binary Mask - {half.capitalize()} Half', cmap='gray')
+                Utils.visualize_dataset(reference_half, figure_size=figure_size, path_to_save=path_to_save, title=f'Reference Image (CHM) - {half.capitalize()} Half')
+                plt.figure(figsize=figure_size)
+                #create a subplot with all the rgb, ndvi, binary mask and reference image
+                _, axs = plt.subplots(1, 5, figsize=(16, 4))
+                axs[0].imshow(rgb_half)
+                axs[0].set_title(f'RGB Image - {half.capitalize()} Half')
+                axs[0].axis('off')
+                axs[1].imshow(ndvi_half, cmap='gray')
+                axs[1].set_title(f'NDVI Image - {half.capitalize()} Half')
+                axs[1].axis('off')
+                axs[2].imshow(binary_mask_half, cmap='gray')
+                axs[2].set_title(f'Binary Mask - {half.capitalize()} Half')
+                axs[2].axis('off')
+                axs[3].imshow(reference_half, cmap='plasma')
+                axs[3].set_title(f'Reference Image (CHM) - {half.capitalize()} Half')
+                axs[3].axis('off')
+                axs[4].imshow(ndvi_half * binary_mask_half * (reference_half / 255 if np.max(reference_half) > 1 else reference_half), cmap='viridis', alpha=0.5)
+                axs[4].set_title(f'Masked CHM Image - {half.capitalize()} Half')
+                axs[4].axis('off')
+                plt.suptitle(f'Min Depth: {min_depth:.2f}, Max Depth: {max_depth:.2f}', fontsize=16)
+                plt.subplots_adjust(top=0.85)
+                plt.tight_layout()
+                fig_path = os.path.join(path_to_save, f'{half}_half_images.png')
+                plt.savefig(fig_path)
+                print(f"🖼️ {half.capitalize()} half images saved under: {fig_path}")
+                plt.close()
+  
+        return metadata
