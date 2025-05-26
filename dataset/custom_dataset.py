@@ -62,8 +62,9 @@ class PrepareDataset:
                  resize: list[int] = [518, 518],
                  batch_size: int = 16,
                  num_workers : int = 1,
-                 ndvi_threshold: float = 0.5,
-                 patch_len: int = 256,
+                 ndvi_threshold: float = 0.2,
+                 patch_len: int = 518,
+                 overlap_ratio: float = 0.25,
                  visualize_patches: bool = False,
                  transform_rgb: Callable = None,
                  transform_chm: Callable = None,
@@ -79,6 +80,7 @@ class PrepareDataset:
             batch_size (int): Batch size for DataLoader.
             num_workers (int): Number of workers for DataLoader.
             patch_len (int): Length of the patches to be extracted from the images.
+            overlap_ratio (float): Overlap ratio for the patches.
             visualize_patches (bool): Whether to visualize the patches or not.
             transform_rgb (Callable): Transformations to be applied to the input images.
             transform_chm (Callable): Transformations to be applied to the target images.
@@ -95,6 +97,7 @@ class PrepareDataset:
         self.num_workers = num_workers
         self.ndvi_threshold = ndvi_threshold
         self.patch_len = patch_len
+        self.overlap_ratio = overlap_ratio
         self.visualize_patches = visualize_patches
         self.transform_rgb  = (Utils.apply_transformation(mean=self.mean,
                                                         std= self.std, 
@@ -113,19 +116,50 @@ class PrepareDataset:
                                                         is_mask=True) if transform_mask is None else transform_mask)
 
         self.image = Utils.read_tiff(self.source_tiff_path)
+        self.reference_image = Utils.read_tiff(self.reference_tiff_path)
         self.rgb_image = self.image[:, :, :3]
         self.nir_image = self.image[:, :, 3]
-        self.reference_image = Utils.read_tiff(self.reference_tiff_path)
-        self.binary_mask, _ = Utils.get_binary_mask(nir_image=self.nir_image,
+        
+        self.binary_mask, self.ndvi_mask = Utils.get_binary_mask(nir_image=self.nir_image,
                                                  rgb_image=self.rgb_image,
-                                                 ndvi_threshold=self.ndvi_threshold,
+                                                 threshold=self.ndvi_threshold,
                                                  figure_size=(10, 10),
                                                  path_to_save=os.path.dirname(self.source_tiff_path))
+        
+        self.metadata = Utils.split_images(rgb_image=self.rgb_image,
+                                           ndvi_mask_image=self.ndvi_mask,
+                                           binary_mask_image=self.binary_mask,
+                                           reference_image=self.reference_image,
+                                           split_type='horizontal',
+                                           path_to_save=os.path.dirname(self.source_tiff_path),
+                                           figure_size=(10, 10))
+        
+        Utils.visualize_histogram(image=self.metadata["top"]["masked_ndvi_chm_image"],
+                                  bins=100,
+                                  title="Masked NDVI CHM Histogram top",
+                                  xlabel="Depth Trees",
+                                  ylabel="Frequency",
+                                  path_to_save=os.path.dirname(self.source_tiff_path),
+                                  name="masked_ndvi_histogram_top")
+        
+        Utils.visualize_histogram(image=self.metadata["bottom"]["masked_ndvi_chm_image"],
+                                  bins=100,
+                                  title="Masked NDVI CHM Histogram bottom",
+                                  xlabel="Depth Trees",
+                                  ylabel="Frequency",
+                                  path_to_save=os.path.dirname(self.source_tiff_path),
+                                  name="masked_ndvi_histogram_bottom")
 
-        self.rgb_patches, self.reference_patches, self.mask_patches = Utils.extract_images_patches(self.rgb_image,
-                                                                                                   self.reference_image,self.binary_mask,
+
+        self.rgb_image_split = self.metadata["top"]['rgb_image']
+        self.reference_image_split = self.metadata["top"]['reference_image']
+        self.binary_mask_split = self.metadata["top"]['binary_mask_image']
+
+        self.rgb_patches, self.reference_patches, self.mask_patches = Utils.extract_images_patches(self.rgb_image_split,
+                                                                                                   self.reference_image_split,
+                                                                                                   self.binary_mask_split,
                                                                                                    patch_len=self.patch_len,
-                                                                                                   stride_ratio=0.25) #✅
+                                                                                                   stride_ratio=self.overlap_ratio)
         
         all_indices = list(range(len(self.rgb_patches)))
         train_indices, val_indices = Utils.split_dataset_indices(all_indices, self.split_size)
@@ -159,8 +193,9 @@ class PrepareDataset:
 #     resize = [518, 518]
 #     batch_size = 16
 #     num_workers = 0
-#     ndvi_threshold = 0.4
-#     patch_len = 256
+#     ndvi_threshold = 0.2
+#     patch_len = 518
+#     overlap_ratio = 0.25
 #     visualize_patches = True
 
 #     dataset_preparer = PrepareDataset(source_tiff_path=source_tiff_path, 
@@ -173,6 +208,7 @@ class PrepareDataset:
 #                                     num_workers=num_workers,
 #                                     ndvi_threshold=ndvi_threshold,
 #                                     patch_len=patch_len,
+#                                     overlap_ratio=overlap_ratio,
 #                                     visualize_patches=visualize_patches)
 #     train_loader, val_loader = dataset_preparer.get_train_val_loaders()
 
@@ -182,5 +218,4 @@ class PrepareDataset:
 #         #     Utils.visualize_patches(train_loader, 
 #         #                             how_many_patches=8,
 #         #                             path_to_save=os.path.dirname(source_tiff_path))
-#         #
 #         break
