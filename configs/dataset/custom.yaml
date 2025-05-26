@@ -1,11 +1,12 @@
 source_tiff_path: D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/RGBNIR.tif
 reference_tiff_path: D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/CHM.tif
-split_size: 0.2
+split_size: 0.3
 mean: [0.485, 0.456, 0.406]
 std: [0.229, 0.224, 0.225]
 resize: [518, 518]
 batch_size: 16
 num_workers: 0
-ndvi_threshold: 0.4
-patch_len: 256
+ndvi_threshold: 0.2
+patch_len: 518
+overlap_ratio: 0.15
 visualize_patches: True
