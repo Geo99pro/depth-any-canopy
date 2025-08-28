@@ -1,221 +1,64 @@
 import os
 import sys
+import numpy as np
+from PIL import Image
+from torch.utils.data import Dataset
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), './././'))
 sys.path.append(project_root)
 
-from utils.utilities import Utils
-from PIL import Image
-from typing import Callable
-from torch.utils.data import Dataset, DataLoader
-
 class CustomDataset(Dataset):
     def __init__(self, 
-                 rgb_patches, 
-                 chm_patches,
-                 mask_patches,
-                 input_transform=None,
-                 target_transform=None,
-                 mask_transform=None):
-        self.rgb_patches = rgb_patches
-        self.chm_patches = chm_patches
-        self.mask_patches = mask_patches
-        self.transform_rgb  =  input_transform
-        self.transform_chm = target_transform
-        self.transform_mask = mask_transform
+                 rgb_image_patches,
+                 chm_image_patches,
+                 mask_image_patches,
+                 source_ids,
+                 rgb_image_transform=None,
+                 chm_image_transform=None,
+                 mask_image_transform=None):
+        
+        self.rgb_image_patches = rgb_image_patches
+        self.chm_image_patches = chm_image_patches
+        self.mask_image_patches = mask_image_patches
+        self.source_ids = source_ids
+        self.rgb_image_transform = rgb_image_transform
+        self.chm_image_transform = chm_image_transform
+        self.mask_image_transform = mask_image_transform
+
 
     def __len__(self):
-        return len(self.rgb_patches)
-
-    def __getitem__(self, idx):
-        x = self.rgb_patches[idx]
-        y = self.chm_patches[idx]
-        mask = self.mask_patches[idx]
+        return len(self.rgb_image_patches)
         
+    def __getitem__(self, idx):
+        x = self.rgb_image_patches[idx]
+        y = self.chm_image_patches[idx]
+        mask = self.mask_image_patches[idx] if self.mask_image_patches is not None else None
+        source_id = self.source_ids[idx]
+
         if x.ndim == 3:
             x = Image.fromarray(x)
-        else: 
-            raise ValueError("Invalid image dimensions. Expected 3D for RGB.")
+        else:
+            raise ValueError("RGB image must be a 3D array.")
+
         if y.ndim == 2:
+            if y.dtype == np.float16:
+                y = y.astype(np.float32)
             y = Image.fromarray(y)
         else:
-            raise ValueError("Invalid image dimensions. Expected 2D for CHM.")
-        if mask.ndim == 2:
-            mask = Image.fromarray(mask)
+            raise ValueError("CHM image must be a 2D array.")
+        
+        if mask is not None:
+            if mask.ndim == 2:
+                mask = Image.fromarray(mask)
+            else:
+                raise ValueError("Mask must be a 2D array.")
+            
+        if self.rgb_image_transform:
+            x = self.rgb_image_transform(x)
+        if self.chm_image_transform:
+            y = self.chm_image_transform(y)
+        if mask is not None and self.mask_image_transform is not None:
+            mask = self.mask_image_transform(mask)
+        if mask is not None:
+            return x, y, mask, source_id
         else:
-            raise ValueError("Invalid image dimensions. Expected 2D for mask.")
-        
-        if self.transform_rgb :
-            x = self.transform_rgb (x)
-        if self.transform_chm:
-            y = self.transform_chm(y)
-        if self.transform_mask:
-            mask = self.transform_mask(mask)
-        return x, y, mask
-
-class PrepareDataset:
-    def __init__(self, 
-                 source_tiff_path: str, 
-                 reference_tiff_path: str, 
-                 split_size: float,
-                 mean: tuple[float, float, float] = [0.485, 0.456, 0.406],
-                 std: tuple[float, float, float] = [0.229, 0.224, 0.225],
-                 resize: list[int] = [518, 518],
-                 batch_size: int = 16,
-                 num_workers : int = 1,
-                 ndvi_threshold: float = 0.2,
-                 patch_len: int = 518,
-                 overlap_ratio: float = 0.25,
-                 visualize_patches: bool = False,
-                 transform_rgb: Callable = None,
-                 transform_chm: Callable = None,
-                 transform_mask: Callable = None):
-        """ 
-        Args:
-            source_tiff_path (str): Path to the source TIFF file.
-            reference_tiff_path (str): Path to the reference TIFF file.
-            split_size (float): Fraction of the dataset to be used for validation.
-            mean (tuple[float, float, float]): Mean values for normalization.
-            std (tuple[float, float, float]): Standard deviation values for normalization.
-            resize (list[int]): Size to resize the images to.
-            batch_size (int): Batch size for DataLoader.
-            num_workers (int): Number of workers for DataLoader.
-            patch_len (int): Length of the patches to be extracted from the images.
-            overlap_ratio (float): Overlap ratio for the patches.
-            visualize_patches (bool): Whether to visualize the patches or not.
-            transform_rgb (Callable): Transformations to be applied to the input images.
-            transform_chm (Callable): Transformations to be applied to the target images.
-            transform_mask (Callable): Transformations to be applied to the masks.
-        """
-        
-        self.source_tiff_path = source_tiff_path
-        self.reference_tiff_path = reference_tiff_path
-        self.split_size = split_size
-        self.mean = mean
-        self.std = std
-        self.resize = resize
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.ndvi_threshold = ndvi_threshold
-        self.patch_len = patch_len
-        self.overlap_ratio = overlap_ratio
-        self.visualize_patches = visualize_patches
-        self.transform_rgb  = (Utils.apply_transformation(mean=self.mean,
-                                                        std= self.std, 
-                                                        size=self.resize,
-                                                        is_input=True) if transform_rgb is None else transform_rgb)
-
-        self.transform_chm = (Utils.apply_transformation(mean=self.mean,
-                                                        std= self.std,
-                                                        size=self.resize,
-                                                        is_input=False) if transform_chm is None else transform_chm)
-
-        self.transform_mask = (Utils.apply_transformation(mean=self.mean,
-                                                        std= self.std,
-                                                        size=self.resize,
-                                                        is_input=False,
-                                                        is_mask=True) if transform_mask is None else transform_mask)
-
-        self.image = Utils.read_tiff(self.source_tiff_path)
-        self.reference_image = Utils.read_tiff(self.reference_tiff_path)
-        self.rgb_image = self.image[:, :, :3]
-        self.nir_image = self.image[:, :, 3]
-        
-        self.binary_mask, self.ndvi_mask = Utils.get_binary_mask(nir_image=self.nir_image,
-                                                 rgb_image=self.rgb_image,
-                                                 threshold=self.ndvi_threshold,
-                                                 figure_size=(10, 10),
-                                                 path_to_save=os.path.dirname(self.source_tiff_path))
-        
-        self.metadata = Utils.split_images(rgb_image=self.rgb_image,
-                                           ndvi_mask_image=self.ndvi_mask,
-                                           binary_mask_image=self.binary_mask,
-                                           reference_image=self.reference_image,
-                                           split_type='horizontal',
-                                           path_to_save=os.path.dirname(self.source_tiff_path),
-                                           figure_size=(10, 10))
-        
-        Utils.visualize_histogram(image=self.metadata["top"]["masked_ndvi_chm_image"],
-                                  bins=100,
-                                  title="Masked NDVI CHM Histogram top",
-                                  xlabel="Depth Trees",
-                                  ylabel="Frequency",
-                                  path_to_save=os.path.dirname(self.source_tiff_path),
-                                  name="masked_ndvi_histogram_top")
-        
-        Utils.visualize_histogram(image=self.metadata["bottom"]["masked_ndvi_chm_image"],
-                                  bins=100,
-                                  title="Masked NDVI CHM Histogram bottom",
-                                  xlabel="Depth Trees",
-                                  ylabel="Frequency",
-                                  path_to_save=os.path.dirname(self.source_tiff_path),
-                                  name="masked_ndvi_histogram_bottom")
-
-
-        self.rgb_image_split = self.metadata["top"]['rgb_image']
-        self.reference_image_split = self.metadata["top"]['reference_image']
-        self.binary_mask_split = self.metadata["top"]['binary_mask_image']
-
-        self.rgb_patches, self.reference_patches, self.mask_patches = Utils.extract_images_patches(self.rgb_image_split,
-                                                                                                   self.reference_image_split,
-                                                                                                   self.binary_mask_split,
-                                                                                                   patch_len=self.patch_len,
-                                                                                                   stride_ratio=self.overlap_ratio)
-        
-        all_indices = list(range(len(self.rgb_patches)))
-        train_indices, val_indices = Utils.split_dataset_indices(all_indices, self.split_size)
-
-        self.train_rgb = self.rgb_patches[train_indices]
-        self.val_rgb = self.rgb_patches[val_indices]
-        self.train_reference = self.reference_patches[train_indices]
-        self.val_reference = self.reference_patches[val_indices]
-        self.train_mask = self.mask_patches[train_indices]
-        self.val_mask = self.mask_patches[val_indices]
-
-        train_dataset = CustomDataset(self.train_rgb, self.train_reference, self.train_mask, input_transform=self.transform_rgb , target_transform=self.transform_chm, mask_transform=self.transform_mask)
-        val_dataset = CustomDataset(self.val_rgb, self.val_reference, self.val_mask, input_transform=self.transform_rgb , target_transform=self.transform_chm, mask_transform=self.transform_mask)
-
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
-        self.val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
-
-        if self.visualize_patches:
-            print("Visualizing patches...")
-            Utils.visualize_patches(loader=self.train_loader, how_many_patches=4, path_to_save=os.path.dirname(self.source_tiff_path))
-    
-    def get_train_val_loaders(self):
-        return self.train_loader, self.val_loader
-     
-# if __name__ == "__main__":
-#     source_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/RGBNIR.tif"
-#     reference_tiff_path = "D:/meus_codigos_doutourado/Depth-any-canopy/rgb_LIDAR/CHM.tif"
-#     split_size = 0.2
-#     mean = [0.485, 0.456, 0.406]
-#     std = [0.229, 0.224, 0.225]
-#     resize = [518, 518]
-#     batch_size = 16
-#     num_workers = 0
-#     ndvi_threshold = 0.2
-#     patch_len = 518
-#     overlap_ratio = 0.25
-#     visualize_patches = True
-
-#     dataset_preparer = PrepareDataset(source_tiff_path=source_tiff_path, 
-#                                     reference_tiff_path=reference_tiff_path, 
-#                                     split_size=split_size,
-#                                     mean=mean,
-#                                     std=std,
-#                                     resize=resize,
-#                                     batch_size=batch_size,
-#                                     num_workers=num_workers,
-#                                     ndvi_threshold=ndvi_threshold,
-#                                     patch_len=patch_len,
-#                                     overlap_ratio=overlap_ratio,
-#                                     visualize_patches=visualize_patches)
-#     train_loader, val_loader = dataset_preparer.get_train_val_loaders()
-
-#     for batch in train_loader:
-#         print(batch[0].shape, batch[1].shape, batch[2].shape)
-#         # if visualize_patches:
-#         #     Utils.visualize_patches(train_loader, 
-#         #                             how_many_patches=8,
-#         #                             path_to_save=os.path.dirname(source_tiff_path))
-#         break
+            return x, y, source_id
