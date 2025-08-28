@@ -7,9 +7,8 @@ import matplotlib
 matplotlib.use("Agg") 
 import matplotlib.pyplot as plt
 
-from osgeo import gdal
-gdal.DontUseExceptions()
-from typing import Callable
+from glob import glob
+from typing import Callable, Optional
 from torchvision import transforms as T
 from torch.utils.data import DataLoader
 from skimage.util import view_as_windows
@@ -18,34 +17,52 @@ from kornia.augmentation import AugmentationSequential
 
 class Utils:
     @staticmethod
-    def read_tiff(file_path):
-        data = gdal.Open(file_path).ReadAsArray()
-        if data.ndim == 3:
-            data = np.transpose(data, (1, 2, 0)) # Transpose to (height, width, channels)
-            data = np.array(data, dtype=np.uint8)
-        elif data.ndim == 2:
-            data = np.array(data)
-        return data
-    
+    def read_tif_image(rbg_img_folder_path: str,
+                  depth_img_folder_path: str):
+        """
+        Read TIFF files from the specified folders and return the data as numpy arrays.
+        Args:
+            rbg_img_folder_path (str): Path to the folder containing RGB TIFF files.
+            depth_img_folder_path (str): Path to the folder containing depth TIFF files.
+        Returns:
+            Tuple[numpy.ndarray, numpy.ndarray]: RGB and depth data as numpy arrays.
+        """
+        rgb_files = sorted(glob(os.path.join(rbg_img_folder_path, '*.tif')))
+        depth_files = sorted(glob(os.path.join(depth_img_folder_path, '*.tif')))
+
+        if not rgb_files or not depth_files:
+            raise ValueError("No TIFF files found in the specified folders.")
+        
+        for rgb_file, depth_file in zip(rgb_files, depth_files):
+            rgb_image = np.transpose(rasterio.open(rgb_file).read(), (1, 2, 0))  # Transpose to HWC format
+            depth_image = np.squeeze(rasterio.open(depth_file).read())  # Read single band depth image
+            print(f"Read RGB image from {rgb_file} with shape {rgb_image.shape}")
+            print(f"Read depth image from {depth_file} with shape {depth_image.shape}")
+            
+            if rgb_image.shape[:2] != depth_image.shape:
+                raise ValueError(f"Shape mismatch: RGB image {rgb_image.shape} and depth image {depth_image.shape} do not match.")
+            yield rgb_image, depth_image
+
     @staticmethod
     def apply_transformation(mean: tuple[float, float, float] = (0.420, 0.411, 0.296),
                             std: tuple[float, float, float] = (0.213, 0.156, 0.143),
-                            size: tuple[int, int] = (518, 518),
                             is_input: bool = True,
                             is_mask: bool = False) -> Callable:
         
         """
         Return a transformation pipeline for RGB, label (CHM), or binary mask.
         """
+        if is_mask:
+            return T.Compose([T.PILToTensor(),  
+                    T.Lambda(lambda x: x.float())  
+                    ])
         if is_input:
-            return T.Compose([T.Resize(size, interpolation=T.InterpolationMode.BILINEAR),
-                            T.ToTensor(),
+            return T.Compose([T.ToTensor(), 
                             T.Normalize(mean=mean, std=std)])
         else:
-            interpolation_mode = T.InterpolationMode.NEAREST if is_mask else T.InterpolationMode.BILINEAR
-            return T.Compose([T.Resize(size, interpolation=interpolation_mode),
-                            T.ToTensor()])
-
+            return T.Compose([T.ToTensor(), 
+                              T.Lambda(lambda x: (x - x.min()) / (x.max() - x.min() + 1e-8))])
+        
     @staticmethod
     def denormalize(tensor: torch.Tensor, 
                 mean: tuple[float, float, float] = (0.420, 0.411, 0.296),
@@ -135,7 +152,7 @@ class Utils:
             plt.title(args.get('title', 'Canopy Height Map'))
             plt.axis('off')
             if path_to_save:
-                fig_path = os.path.join(path_to_save, 'canopy_height_map.png')
+                fig_path = os.path.join(path_to_save, args.get('name', 'canopy_height_map.png'))
                 plt.savefig(fig_path)
             plt.close()
         else:
@@ -143,23 +160,38 @@ class Utils:
 
     @staticmethod
     def visualize_patches(loader: DataLoader, 
-                          how_many_patches: int = 4,
-                          path_to_save: str = None):
+                      how_many_patches: int = 4,
+                      path_to_save: Optional[str] = None,
+                      **args):
         """
         Visualize patches from a given DataLoader.
 
         Parameters:
-            loader (DataLoader): DataLoader to visualize patches from. It contains batches of rgb images, labels and masks.
+            loader (DataLoader): Yields batches of (x, y) or (x, y, mask).
             how_many_patches (int): Number of patches to visualize.
             path_to_save (str): Optional path to save the visualized patches.
         """
-
         images, labels, masks = [], [], []
-        for x, y, mask in loader:
+
+        for batch in loader:
+            if len(batch) == 3:
+                x, y, mask = batch
+                has_mask = True
+            elif len(batch) == 2:
+                x, y = batch
+                mask = None
+                has_mask = False
+            elif len(batch) == 4:
+                x, y, mask, _ = batch
+                has_mask = True
+            else:
+                raise ValueError("DataLoader must return (x, y) or (x, y, mask)")
+
             for i in range(len(x)):
                 images.append(Utils.denormalize(x[i]).numpy())
                 labels.append(y[i].numpy())
-                masks.append(mask[i].numpy())
+                if has_mask:
+                    masks.append(mask[i].numpy())
                 if len(images) == how_many_patches:
                     break
             if len(images) == how_many_patches:
@@ -167,46 +199,51 @@ class Utils:
 
         ncols = min(how_many_patches, 4)
         nrows = (how_many_patches + ncols - 1) // ncols
-        _, axs = plt.subplots(nrows=nrows * 4, ncols=ncols, figsize=(ncols * 4, nrows * 4 * 1.5))
-        axs = np.array(axs).reshape(nrows * 4, ncols)
+        fig_height = nrows * (4 if has_mask else 2) * 1.5
+        fig, axs = plt.subplots(nrows=nrows * (4 if has_mask else 2), ncols=ncols, figsize=(ncols * 4, fig_height))
+        axs = np.array(axs).reshape(nrows * (4 if has_mask else 2), ncols)
 
         for i in range(how_many_patches):
-            row = (i // ncols) * 4
+            row = (i // ncols) * (4 if has_mask else 2)
             col = i % ncols
 
-            axs[row, col].imshow(np.clip(images[i].transpose(1, 2, 0), 0, 255)) # CHW to HWC
+            axs[row, col].imshow(np.clip(images[i].transpose(1, 2, 0), 0, 255))
             axs[row, col].axis('off')
-            axs[row, col].set_title('Satellite RGB Image')
+            axs[row, col].set_title('RGB Image')
 
-            axs[row + 1, col].imshow(labels[i].squeeze(0), cmap='plasma') #label image comes with (1, H, W) shape
+            im=axs[row + 1, col].imshow(labels[i].squeeze(), cmap='Spectral_r', vmin=0, vmax=1)
+            axs[row + 1, col].set_xlabel(f'Min: {np.min(labels[i]):.2f}, Max: {np.max(labels[i]):.2f}')
             axs[row + 1, col].axis('off')
             axs[row + 1, col].set_title('CHM Image')
+            #fig.colorbar(im, ax=axs[row + 1, col])
 
-            axs[row + 2, col].imshow(mask[i].squeeze(0), cmap='gray', alpha=0.5) #mask image comes with (1, H, W) shape
-            axs[row + 2, col].axis('off')
-            axs[row + 2, col].set_title('NDVI Binary Mask Overlay')
+            if has_mask:
+                im_2= axs[row + 2, col].imshow(masks[i].squeeze(), cmap='gray', alpha=0.5)
+                axs[row + 2, col].axis('off')
+                axs[row + 2, col].set_title('Binary Mask')
+                #fig.colorbar(im_2, ax=axs[row + 2, col])
 
-            axs[row + 3, col].imshow(mask[i].squeeze(0)*labels[i].squeeze(0), cmap='viridis', alpha=0.5)
-            axs[row + 3, col].axis('off')
-            axs[row + 3, col].set_title('Masked CHM Image')
-            axs[row + 3, col].set_xlabel(f'Patch {i + 1}')
-
+                axs[row + 3, col].imshow(masks[i].squeeze() * labels[i].squeeze(), cmap='viridis', alpha=0.5)
+                axs[row + 3, col].axis('off')
+                axs[row + 3, col].set_title('Masked CHM')
+                axs[row + 3, col].set_xlabel(f'Patch {i + 1}')
+                #fig.colorbar(im_2, ax=axs[row + 3, col])
 
         plt.tight_layout()
         if path_to_save:
-            fig_path = os.path.join(path_to_save, f'{how_many_patches}_patches_visualization.png')
+            fig_path = os.path.join(path_to_save, f"{args.get('name')}_{how_many_patches}_patches_visualization.png")
             plt.savefig(fig_path)
             print(f"🖼️ Patches saved under: {fig_path}")
         plt.close()
 
     @staticmethod
     def visualize_histogram(image: np.ndarray, 
-                                bins: int = 256,  
-                                title: str = 'Histogram', 
-                                xlabel: str = 'Pixel Value', 
-                                ylabel: str = 'Frequency',
-                                path_to_save: str = None,
-                                name: str = 'histogram'):
+                            bins: int = 100,  
+                            title: str = 'Histogram', 
+                            xlabel: str = 'Pixel Value', 
+                            ylabel: str = 'Frequency',
+                            path_to_save: str = None,
+                            name: str = 'histogram'):
         """
         Visualize the histogram of an image.
         
@@ -235,38 +272,49 @@ class Utils:
         plt.close()
 
     @staticmethod
+    def get_outlier_outlier_mask(reference_image: np.ndarray,
+                                 multiplier: float = 1.5) -> np.ndarray:
+        valid = reference_image[~np.isnan(reference_image)]
+        q1 = np.percentile(valid, 25)
+        q3 = np.percentile(valid, 75)
+        iqr = q3 - q1
+        upper_limit = q3 + multiplier * iqr
+        return reference_image > upper_limit
+
+    @staticmethod
     def extract_images_patches(rgb_image,
                             reference_image,
-                            binary_mask_image: np.ndarray,
-                            patch_len: int = 518,
-                            stride_ratio: float = 0.5):
+                            patch_size: int = 518,
+                            stride_ratio: float = 0.5,
+                            **args)-> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Extract patches from the input image using a sliding window approach.
-        
         Parameters:
             rgb_image (numpy.ndarray): Input RGB image.
             reference_image (numpy.ndarray): Reference image (e.g., CHM).
-            binary_mask_image (numpy.ndarray): Binary mask image obtained from the NIR image.
-            patch_len (int): Length of the patches to be extracted.
+            patch_size (int): Length of the patches to be extracted.
             stride_ratio (float): Ratio of the stride length to the patch length. 0.5 means 50% overlap, 0.25 means 75% overlap, 0.15 means 85% overlap.
-
+            args (dict): Additional arguments such as binary_mask_image. Such as: binary_mask_image which is a binary mask image obtained from the NIR image. 
         Returns:
             Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]: Patches of RGB image, reference image, and binary mask image.
         """
         channel_n = 3
-        train_step = int(patch_len * stride_ratio)
+        train_step = int(patch_size * stride_ratio)
 
-
-        print(f'Image shape: {rgb_image.shape}, CHM: {reference_image.shape}, Mask: {binary_mask_image.shape}')
-        print(f'Patch size: {patch_len}, Step: {train_step} → Overlap: {100 - stride_ratio * 100:.0f}%')
+        print(f'Patch size: {patch_size}, Step: {train_step} → Overlap: {100 - stride_ratio * 100:.0f}%')
         
-        rgb_image_patch = view_as_windows(rgb_image, (patch_len, patch_len, channel_n), step=train_step)
-        reference_image_patch = view_as_windows(reference_image, (patch_len, patch_len), step=train_step)
-        mask_image_patch = view_as_windows(binary_mask_image, (patch_len, patch_len), step=train_step)
-
-        rgb_image_patch = rgb_image_patch.reshape(-1, patch_len, patch_len, channel_n)
-        reference_image_patch = reference_image_patch.reshape(-1, patch_len, patch_len)
-        mask_image_patch = mask_image_patch.reshape(-1, patch_len, patch_len)
+        rgb_image_patch = view_as_windows(rgb_image, (patch_size, patch_size, channel_n), step=train_step)
+        reference_image_patch = view_as_windows(reference_image, (patch_size, patch_size), step=train_step)
+        binary_mask_image = args.get('binary_mask_image', None)
+        if binary_mask_image is not None:
+            print(f'Image shape: {rgb_image.shape}, CHM: {reference_image.shape}, Mask: {binary_mask_image.shape}')
+            mask_image_patch = view_as_windows(binary_mask_image, (patch_size, patch_size), step=train_step)
+        else:
+            mask_image_patch = None
+        rgb_image_patch = rgb_image_patch.reshape(-1, patch_size, patch_size, channel_n)
+        reference_image_patch = reference_image_patch.reshape(-1, patch_size, patch_size)
+        if mask_image_patch is not None:
+            mask_image_patch = mask_image_patch.reshape(-1, patch_size, patch_size)
         print(f"🤖 The number of patches obtained is: {rgb_image_patch.shape[0]}")
         return rgb_image_patch, reference_image_patch, mask_image_patch
 
@@ -355,17 +403,17 @@ class Utils:
             Tuple[numpy.ndarray, numpy.ndarray]: Binary mask and NDVI.
         """
         red_channel = rgb_image[:, :, 0]
-        if np.max(red_channel) > 1:
-            red_channel = red_channel / 255.0
-        if np.max(nir_image) > 1:
-            nir_image = nir_image / 255.0
+        # if np.max(red_channel) > 1:
+        #     red_channel = red_channel / 255.0
+        # if np.max(nir_image) > 1:
+        #     nir_image = nir_image / 255.0
         ndvi  = (nir_image - red_channel) / (nir_image + red_channel + 1e-8)
         binary_mask = np.where(ndvi  > threshold, 1, 0).astype(np.float32)
 
         if path_to_save:
-            Utils.visualize_dataset(binary_mask, figure_size=figure_size, path_to_save=path_to_save, title='Binary Mask', cmap='gray')
+            Utils.visualize_dataset(binary_mask, figure_size=figure_size, path_to_save=path_to_save, title='Binary Mask', cmap='gray', name='NDVI_Binary_mask.png')
             plt.figure(figsize=figure_size)
-            plt.imshow(rgb_image)
+            plt.imshow(rgb_image / 255.0 if np.max(rgb_image) > 1 else rgb_image)
             plt.imshow(binary_mask, alpha=0.5, cmap='gray')
             plt.axis('off')
             plt.title('Binary Mask Overlay')
@@ -374,13 +422,11 @@ class Utils:
         return binary_mask, ndvi
     
     @staticmethod
-    def get_min_max_depth(ndvi_image: np.ndarray,
-                          binary_mask_image: np.ndarray,
-                          reference_image: np.ndarray) -> tuple[float, float]:
+    def get_min_max_depth(binary_mask: np.ndarray,
+                          chm_image: np.ndarray) -> tuple[float, float]:
         """
         Calculate the minimum and maximum depth from the NDVI image, binary mask image, and reference image.
         Parameters:
-            ndvi_image (numpy.ndarray): NDVI image.
             binary_mask_image (numpy.ndarray): Binary mask image obtained from the NIR image.
             reference_image (numpy.ndarray): Reference image (e.g., CHM).
 
@@ -388,9 +434,16 @@ class Utils:
 
             Tuple[float, float]: Minimum and maximum depth.
         """
-        reference_image = reference_image/255 if np.max(reference_image) > 1 else reference_image
-        result = ndvi_image * binary_mask_image * reference_image
-        return np.min(result), np.max(result)
+        #norma_chm_image = chm_image/255 if np.max(chm_image) > 1 else chm_image
+
+        depth_map = binary_mask * chm_image
+        norm_depth_map = (depth_map - depth_map.min()) / (depth_map.max() - depth_map.min() + 1e-8)
+
+        min_norm_depth_map = np.min(norm_depth_map)
+        max_norm_depth_map = np.max(norm_depth_map)
+        min_depth_map = np.min(depth_map)
+        max_depth_map = np.max(depth_map)
+        return min_norm_depth_map, max_norm_depth_map, min_depth_map, max_depth_map
     
     @staticmethod
     def _side_handler(image: np.ndarray, which_half: str = 'top', axis: int = 0) -> np.ndarray:
@@ -409,30 +462,29 @@ class Utils:
 
     @staticmethod
     def split_images(rgb_image: np.ndarray,
-                    ndvi_mask_image: np.ndarray,
-                    binary_mask_image: np.ndarray,
-                    reference_image: np.ndarray,
+                    chm_image: np.ndarray,
+                    ndvi_mask: np.ndarray,
+                    binary_mask: np.ndarray,
                     split_type: str = 'horizontal',
-                    path_to_save: str = None,
-                    figure_size: tuple[int, int] = (8, 8)) -> dict:
+                    path_to_save: str = None) -> dict:
         """
         Split the RGB image into two parts based on the split type.
         
         Parameters:
             rgb_image (numpy.ndarray): Input RGB image.
-            ndvi_image (numpy.ndarray): NDVI image.
-            binary_mask_image (numpy.ndarray): Binary mask image obtained from the NIR image.
-            reference_image (numpy.ndarray): Reference image (e.g., CHM).
+            chm_image (numpy.ndarray): Reference image (e.g., CHM).
+            ndvi_mask (numpy.ndarray): NDVI image.
+            binary_mask (numpy.ndarray): Binary mask image obtained from the NIR image.
             split_type (str): Type of split ('horizontal' or 'vertical').
         
         Returns:
             dict: Metadata for the top and bottom halves of the split images.
         """
-        for img in [rgb_image, ndvi_mask_image, binary_mask_image, reference_image]:
+        for img in [rgb_image, ndvi_mask, binary_mask, chm_image]:
             if not isinstance(img, np.ndarray):
                 raise ValueError("All images must be numpy arrays.")
         
-        if not (rgb_image.shape[:2] == ndvi_mask_image.shape[:2] == binary_mask_image.shape[:2] == reference_image.shape[:2]):
+        if not (rgb_image.shape[:2] == ndvi_mask.shape[:2] == binary_mask.shape[:2] == chm_image.shape[:2]):
             raise ValueError("All images must have the same spatial dimensions.")
         
         if split_type == 'horizontal':
@@ -446,44 +498,51 @@ class Utils:
 
         for half in ['top', 'bottom']:
             rgb_half = Utils._side_handler(rgb_image, half, axis)
-            ndvi_half = Utils._side_handler(ndvi_mask_image, half, axis)
-            binary_mask_half = Utils._side_handler(binary_mask_image, half, axis)
-            reference_half = Utils._side_handler(reference_image, half, axis)
+            ndvi_half = Utils._side_handler(ndvi_mask, half, axis)
+            binary_mask_half = Utils._side_handler(binary_mask, half, axis)
+            chm_half = Utils._side_handler(chm_image, half, axis)
 
-            min_depth, max_depth = Utils.get_min_max_depth(ndvi_half, binary_mask_half, reference_half)
+            min_depth, max_depth = Utils.get_min_max_depth(binary_mask_half, chm_half)
             metadata[half] = {
                 'rgb_image': rgb_half,
-                'ndvi_image': ndvi_half,
-                'binary_mask_image': binary_mask_half,
-                'reference_image': reference_half,
-                "masked_ndvi_chm_image": ndvi_half * binary_mask_half * (reference_half / 255 if np.max(reference_half) > 1 else reference_half),
+                'chm_image': chm_half,
+                'ndvi_mask': ndvi_half,
+                'binary_mask': binary_mask_half,
                 'min_depth': min_depth,
-                'max_depth': max_depth
-            }
+                'max_depth': max_depth}
 
             if path_to_save:
-                Utils.visualize_dataset(rgb_half, figure_size=figure_size, path_to_save=path_to_save, title=f'RGB Image - {half.capitalize()} Half')
-                Utils.visualize_dataset(ndvi_half, figure_size=figure_size, path_to_save=path_to_save, title=f'NDVI Image - {half.capitalize()} Half')
-                Utils.visualize_dataset(binary_mask_half, figure_size=figure_size, path_to_save=path_to_save, title=f'Binary Mask - {half.capitalize()} Half', cmap='gray')
-                Utils.visualize_dataset(reference_half, figure_size=figure_size, path_to_save=path_to_save, title=f'Reference Image (CHM) - {half.capitalize()} Half')
-                plt.figure(figsize=figure_size)
-                #create a subplot with all the rgb, ndvi, binary mask and reference image
-                _, axs = plt.subplots(1, 5, figsize=(16, 4))
-                axs[0].imshow(rgb_half)
+                Utils.visualize_dataset(rgb_half, 
+                                        path_to_save=path_to_save, 
+                                        title=f'RGB Image - {half.capitalize()} Half')
+                Utils.visualize_dataset(ndvi_half,
+                                        path_to_save=path_to_save, 
+                                        title=f'NDVI Image - {half.capitalize()} Half')
+                Utils.visualize_dataset(binary_mask_half,
+                                        path_to_save=path_to_save, 
+                                        title=f'Binary Mask - {half.capitalize()} Half',
+                                        cmap='gray')
+                Utils.visualize_dataset(chm_half, 
+                                        path_to_save=path_to_save, 
+                                        title=f'Reference Image (CHM) - {half.capitalize()} Half')
+                
+                #plt.figure(figsize=figure_size)
+                _, axs = plt.subplots(1, 4, figsize=(16, 4))
+                axs[0].imshow(rgb_half/255.0)
                 axs[0].set_title(f'RGB Image - {half.capitalize()} Half')
                 axs[0].axis('off')
                 axs[1].imshow(ndvi_half, cmap='gray')
-                axs[1].set_title(f'NDVI Image - {half.capitalize()} Half')
+                axs[1].set_title(f'NDVI Mask - {half.capitalize()} Half')
                 axs[1].axis('off')
                 axs[2].imshow(binary_mask_half, cmap='gray')
                 axs[2].set_title(f'Binary Mask - {half.capitalize()} Half')
                 axs[2].axis('off')
-                axs[3].imshow(reference_half, cmap='plasma')
-                axs[3].set_title(f'Reference Image (CHM) - {half.capitalize()} Half')
+                axs[3].imshow(chm_half/255.0, cmap='plasma')
+                axs[3].set_title(f'CHM Image (CHM) - {half.capitalize()} Half')
                 axs[3].axis('off')
-                axs[4].imshow(ndvi_half * binary_mask_half * (reference_half / 255 if np.max(reference_half) > 1 else reference_half), cmap='viridis', alpha=0.5)
-                axs[4].set_title(f'Masked CHM Image - {half.capitalize()} Half')
-                axs[4].axis('off')
+                # axs[4].imshow(binary_mask_half * (chm_half / 255 if np.max(chm_half) > 1 else chm_half), cmap='viridis', alpha=0.5)
+                # axs[4].set_title(f'Masked CHM Image - {half.capitalize()} Half')
+                # axs[4].axis('off')
                 plt.suptitle(f'Min Depth: {min_depth:.2f}, Max Depth: {max_depth:.2f}', fontsize=16)
                 plt.subplots_adjust(top=0.85)
                 plt.tight_layout()
