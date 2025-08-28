@@ -1,6 +1,6 @@
 defaults:
   - _self_
   - dataset: custom
-  - model: depthany_canopy_small
+  - model: depthany_small
   - trainer: default
 logger: "comet"
