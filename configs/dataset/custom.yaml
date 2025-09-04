@@ -1,0 +1,15 @@
+name: custom_dataset
+is_train: False
+images_folder_path: /path/to/images
+chm_folder_path: /path/to/chm
+sam_mask: /path/to/sam_mask
+split_ratio: 0.8
+mean: [0.485, 0.456, 0.406]
+std: [0.229, 0.224, 0.225]
+batch_size: 8
+num_workers: 0
+patch_size: 518
+overlap_ratio: 0.5
+split_type: horizontal
+top_side_as_train: False
+visualize_patches: True

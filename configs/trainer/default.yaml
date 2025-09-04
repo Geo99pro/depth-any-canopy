@@ -1,2 +1,2 @@
 devices: [0]
-max_epochs: 2
+max_epochs: 15
