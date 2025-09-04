@@ -4,3 +4,11 @@ defaults:
   - model: depthany_small
   - trainer: default
 logger: "comet"
+comet:
+  api_key: "your_api_key_here"
+  workspace: "your_workspace_here"
+  project_name: "your_project_name_here"
+  log_model_checkpoints: False
+  log_every_n_steps: 50
+  online: True
+  tags: ["depth_estimation", "fine-tuning"]
